@@ -1,0 +1,11 @@
+# ai-jail sandbox configuration
+# https://github.com/akitaonrails/ai-jail
+# Edit freely. Regenerate with: ai-jail --clean --init
+
+command = ["/usr/bin/codex"]
+rw_maps = []
+ro_maps = []
+hide_dotdirs = []
+mask = []
+no_docker = true
+allow_tcp_ports = []
