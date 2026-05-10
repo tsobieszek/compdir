@@ -1,3 +1,4 @@
+1.
 Please generate a CLI tool `compdir` using Rust. It accepts either 2 (left and right) or 1 (right) arguments. (Except for -h, --help which
   shows a brief synopsis and exist).
   Each of these arguments are of shape 'path' or 'host:path' or 'host:'
@@ -29,3 +30,7 @@ Please generate a CLI tool `compdir` using Rust. It accepts either 2 (left and r
  
   ```
   (L refers to the left or first argument and R to the right or second argument relative path trees)
+
+2.
+Please add -H, --hyperlink option to add support to OSC 8 shell hyperlinks (link to the full paths). Add -c, --color option to colorize
+  basename entries (first row of blocks) in blue. Update --help and README.md.

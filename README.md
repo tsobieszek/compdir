@@ -5,13 +5,17 @@
 ## Usage
 
 ```text
-compdir <right>
-compdir <left> <right>
-compdir -h
-compdir --help
+compdir [-H|--hyperlink] [-c|--color] <right>
+compdir [-H|--hyperlink] [-c|--color] <left> <right>
+compdir -h|--help
 ```
 
 With one positional argument, `compdir` uses the current directory as the left side and the provided argument as the right side.
+
+Optional display flags:
+
+- `-H`, `--hyperlink` wraps each displayed directory path in an OSC 8 hyperlink that points to the full path
+- `-c`, `--color` colors the basename row of each block blue
 
 ## Argument Forms
 
@@ -56,6 +60,9 @@ L mydir2
 ```
 
 `L` refers to the left argument and `R` refers to the right argument.
+
+If `-H` is enabled, the path text on each `L`/`R` line becomes a clickable OSC 8 hyperlink to the full path for that entry.
+If `-c` is enabled, the basename row at the top of each block is printed in blue.
 
 ## Implementation Notes
 

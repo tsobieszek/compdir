@@ -1,9 +1,22 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output};
+
+#[derive(Debug, Clone, Copy)]
+struct RenderOptions {
+    hyperlink: bool,
+    color: bool,
+}
+
+#[derive(Debug)]
+struct CliOptions {
+    help: bool,
+    render: RenderOptions,
+    positionals: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 enum ParsedArg {
@@ -35,14 +48,14 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let cli = parse_cli(env::args().skip(1));
 
-    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+    if cli.help {
         print_help();
         return Ok(());
     }
 
-    let (left_raw, right_raw) = match args.as_slice() {
+    let (left_raw, right_raw) = match cli.positionals.as_slice() {
         [right] => (".", right.as_str()),
         [left, right] => (left.as_str(), right.as_str()),
         _ => {
@@ -56,10 +69,7 @@ fn run() -> Result<(), String> {
     let left_dirs = collect_dirs(&left)?;
     let right_dirs = collect_dirs(&right)?;
 
-    let left_only: BTreeSet<String> = left_dirs.difference(&right_dirs).cloned().collect();
-    let right_only: BTreeSet<String> = right_dirs.difference(&left_dirs).cloned().collect();
-
-    let report = render_report(&left_only, &right_only);
+    let report = render_report(&left_dirs, &right_dirs, cli.render);
     if !report.is_empty() {
         println!("{report}");
     }
@@ -69,8 +79,30 @@ fn run() -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "Usage:\n  compdir <right>\n  compdir <left> <right>\n\nEach argument is `path`, `host:path`, or `host:`.\nIf one side is `host:` and the other is a local `path`, the remote side uses the local path's absolute form.\nIf both sides are `host:`, each side uses that host's current directory."
+        "Usage:\n  compdir [-H|--hyperlink] [-c|--color] <right>\n  compdir [-H|--hyperlink] [-c|--color] <left> <right>\n  compdir -h|--help\n\nOptions:\n  -H, --hyperlink  add OSC 8 hyperlinks to the full paths\n  -c, --color      colorize basename rows in blue\n\nEach argument is `path`, `host:path`, or `host:`.\nIf one side is `host:` and the other is a local `path`, the remote side uses the local path's absolute form.\nIf both sides are `host:`, each side uses that host's current directory."
     );
+}
+
+fn parse_cli(args: impl IntoIterator<Item = String>) -> CliOptions {
+    let mut help = false;
+    let mut hyperlink = false;
+    let mut color = false;
+    let mut positionals = Vec::new();
+
+    for arg in args {
+        match arg.as_str() {
+            "-h" | "--help" => help = true,
+            "-H" | "--hyperlink" => hyperlink = true,
+            "-c" | "--color" => color = true,
+            _ => positionals.push(arg),
+        }
+    }
+
+    CliOptions {
+        help,
+        render: RenderOptions { hyperlink, color },
+        positionals,
+    }
 }
 
 fn normalize_pair(
@@ -167,15 +199,15 @@ fn resolve_remote_path(host: &str, path: Option<&str>) -> Result<String, String>
     Ok(root.to_string())
 }
 
-fn collect_dirs(target: &ResolvedTarget) -> Result<BTreeSet<String>, String> {
+fn collect_dirs(target: &ResolvedTarget) -> Result<BTreeMap<String, String>, String> {
     match target {
         ResolvedTarget::Local(root) => collect_local_dirs(root),
         ResolvedTarget::Remote { host, root } => collect_remote_dirs(host, root),
     }
 }
 
-fn collect_local_dirs(root: &Path) -> Result<BTreeSet<String>, String> {
-    let mut dirs = BTreeSet::new();
+fn collect_local_dirs(root: &Path) -> Result<BTreeMap<String, String>, String> {
+    let mut dirs = BTreeMap::new();
     let mut stack = vec![root.to_path_buf()];
 
     while let Some(dir) = stack.pop() {
@@ -194,7 +226,9 @@ fn collect_local_dirs(root: &Path) -> Result<BTreeSet<String>, String> {
                     format!("failed to compute relative path for `{}`", path.display())
                 })?;
                 if !rel.as_os_str().is_empty() {
-                    dirs.insert(path_to_string(rel));
+                    let rel_path = path_to_string(rel);
+                    let full_path = path_to_string(&path);
+                    dirs.insert(rel_path, local_uri(&full_path));
                 }
                 stack.push(path);
             }
@@ -204,7 +238,7 @@ fn collect_local_dirs(root: &Path) -> Result<BTreeSet<String>, String> {
     Ok(dirs)
 }
 
-fn collect_remote_dirs(host: &str, root: &str) -> Result<BTreeSet<String>, String> {
+fn collect_remote_dirs(host: &str, root: &str) -> Result<BTreeMap<String, String>, String> {
     let remote_cmd = format!(
         "cd -- {} && find . -mindepth 1 -type d -print0",
         shell_quote(root)
@@ -214,7 +248,7 @@ fn collect_remote_dirs(host: &str, root: &str) -> Result<BTreeSet<String>, Strin
         return Err(format_ssh_failure(host, &remote_cmd, &output));
     }
 
-    let mut dirs = BTreeSet::new();
+    let mut dirs = BTreeMap::new();
     for raw in output.stdout.split(|byte| *byte == 0) {
         if raw.is_empty() {
             continue;
@@ -225,35 +259,52 @@ fn collect_remote_dirs(host: &str, root: &str) -> Result<BTreeSet<String>, Strin
             raw
         };
         if !rel.is_empty() {
-            dirs.insert(bytes_to_path_string(rel));
+            let rel_path = bytes_to_path_string(rel);
+            let full_path = join_remote_path(root, &rel_path);
+            dirs.insert(rel_path, remote_uri(host, &full_path));
         }
     }
     Ok(dirs)
 }
 
-fn render_report(left_only: &BTreeSet<String>, right_only: &BTreeSet<String>) -> String {
-    let mut groups: BTreeMap<String, Vec<(Side, String)>> = BTreeMap::new();
+fn render_report(
+    left_dirs: &BTreeMap<String, String>,
+    right_dirs: &BTreeMap<String, String>,
+    options: RenderOptions,
+) -> String {
+    let mut groups: BTreeMap<String, Vec<(Side, String, String)>> = BTreeMap::new();
 
-    for rel_path in left_only {
-        groups
-            .entry(basename(rel_path))
-            .or_default()
-            .push((Side::Left, rel_path.clone()));
+    for (rel_path, full_path) in left_dirs {
+        if !right_dirs.contains_key(rel_path) {
+            groups.entry(basename(rel_path)).or_default().push((
+                Side::Left,
+                rel_path.clone(),
+                full_path.clone(),
+            ));
+        }
     }
-    for rel_path in right_only {
-        groups
-            .entry(basename(rel_path))
-            .or_default()
-            .push((Side::Right, rel_path.clone()));
+    for (rel_path, full_path) in right_dirs {
+        if !left_dirs.contains_key(rel_path) {
+            groups.entry(basename(rel_path)).or_default().push((
+                Side::Right,
+                rel_path.clone(),
+                full_path.clone(),
+            ));
+        }
     }
 
     let mut blocks = Vec::new();
     for (basename, mut entries) in groups {
         entries.sort_by(|a, b| a.cmp(b));
         let mut block = Vec::with_capacity(entries.len() + 1);
-        block.push(basename);
-        for (side, rel_path) in entries {
-            block.push(format!("{} {}", side.prefix(), rel_path));
+        block.push(format_basename(&basename, options.color));
+        for (side, rel_path, full_path) in entries {
+            let display_path = if options.hyperlink {
+                osc8_link(&rel_path, &full_path)
+            } else {
+                rel_path
+            };
+            block.push(format!("{} {}", side.prefix(), display_path));
         }
         blocks.push(block.join("\n"));
     }
@@ -270,10 +321,70 @@ fn basename(path: &str) -> String {
 }
 
 fn path_to_string(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
+    let mut components = path.components();
+    let Some(first) = components.next() else {
+        return String::new();
+    };
+
+    let mut output = first.as_os_str().to_string_lossy().into_owned();
+    for component in components {
+        if !output.ends_with('/') {
+            output.push('/');
+        }
+        output.push_str(&component.as_os_str().to_string_lossy());
+    }
+    output
+}
+
+fn local_uri(path: &str) -> String {
+    format!("file://{}", encode_uri_path(path))
+}
+
+fn remote_uri(host: &str, path: &str) -> String {
+    format!("ssh://{host}{}", encode_uri_path(path))
+}
+
+fn join_remote_path(root: &str, rel_path: &str) -> String {
+    if root == "/" {
+        format!("/{rel_path}")
+    } else {
+        format!("{}/{}", root.trim_end_matches('/'), rel_path)
+    }
+}
+
+fn encode_uri_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+
+    for ch in path.chars() {
+        match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' => encoded.push(ch),
+            _ => {
+                let mut buffer = [0u8; 4];
+                for byte in ch.encode_utf8(&mut buffer).as_bytes() {
+                    encoded.push('%');
+                    encoded.push_str(&format!("{byte:02X}"));
+                }
+            }
+        }
+    }
+
+    encoded
+}
+
+fn format_basename(name: &str, color: bool) -> String {
+    if color {
+        blue(name)
+    } else {
+        name.to_string()
+    }
+}
+
+fn blue(text: &str) -> String {
+    format!("\x1b[34m{text}\x1b[0m")
+}
+
+fn osc8_link(text: &str, uri: &str) -> String {
+    format!("\x1b]8;;{uri}\x1b\\{text}\x1b]8;;\x1b\\")
 }
 
 fn bytes_to_path_string(path: &[u8]) -> String {
@@ -329,28 +440,57 @@ mod tests {
 
     #[test]
     fn renders_expected_grouping() {
-        let left: BTreeSet<String> = [
+        let left: BTreeMap<String, String> = [
             "a/b/my-dir".to_string(),
             "c/d/e/my-dir".to_string(),
             "mydir2".to_string(),
         ]
         .into_iter()
+        .map(|rel| (rel.clone(), format!("file:///left/{rel}")))
         .collect();
-        let right: BTreeSet<String> = [
+        let right: BTreeMap<String, String> = [
             "a/b/my-dir".to_string(),
             "x/my-dir".to_string(),
             "z/w/s/my-dir".to_string(),
         ]
         .into_iter()
+        .map(|rel| (rel.clone(), format!("file:///right/{rel}")))
         .collect();
 
-        let left_only: BTreeSet<String> = left.difference(&right).cloned().collect();
-        let right_only: BTreeSet<String> = right.difference(&left).cloned().collect();
-
-        let rendered = render_report(&left_only, &right_only);
+        let rendered = render_report(
+            &left,
+            &right,
+            RenderOptions {
+                hyperlink: false,
+                color: false,
+            },
+        );
         assert_eq!(
             rendered,
             "my-dir\nL c/d/e/my-dir\nR x/my-dir\nR z/w/s/my-dir\n\nmydir2\nL mydir2"
+        );
+    }
+
+    #[test]
+    fn renders_hyperlinks_and_color() {
+        let left: BTreeMap<String, String> =
+            [("my-dir".to_string(), "file:///left/my-dir".to_string())]
+                .into_iter()
+                .collect();
+        let right: BTreeMap<String, String> = BTreeMap::new();
+
+        let rendered = render_report(
+            &left,
+            &right,
+            RenderOptions {
+                hyperlink: true,
+                color: true,
+            },
+        );
+
+        assert_eq!(
+            rendered,
+            "\x1b[34mmy-dir\x1b[0m\nL \x1b]8;;file:///left/my-dir\x1b\\my-dir\x1b]8;;\x1b\\"
         );
     }
 
@@ -363,5 +503,31 @@ mod tests {
     #[test]
     fn basename_uses_last_component() {
         assert_eq!(basename("a/b/c"), "c");
+    }
+
+    #[test]
+    fn path_to_string_preserves_absolute_roots() {
+        assert_eq!(path_to_string(Path::new("/a/b")), "/a/b");
+    }
+
+    #[test]
+    fn uri_helpers_encode_spaces() {
+        assert_eq!(local_uri("/tmp/a b"), "file:///tmp/a%20b");
+        assert_eq!(remote_uri("host", "/tmp/a b"), "ssh://host/tmp/a%20b");
+    }
+
+    #[test]
+    fn cli_flags_can_be_combined_with_positionals() {
+        let cli = parse_cli([
+            "-H".to_string(),
+            "left".to_string(),
+            "--color".to_string(),
+            "right".to_string(),
+        ]);
+
+        assert!(!cli.help);
+        assert!(cli.render.hyperlink);
+        assert!(cli.render.color);
+        assert_eq!(cli.positionals, vec!["left", "right"]);
     }
 }
