@@ -6,16 +6,16 @@ Please generate a CLI tool `compdir` using Rust. It accepts either 2 (left and r
   Subsequently if one of the arguments is of shape 'host:' and the other is of shape 'path' then use 'host:path' path (resolve full path first)
   instead of 'host:' shape. If both arguments are of shape 'host:' then use 'host:$(pwd)' instead
   Use ssh to access hosts.
- 
+
   The program recursively scans left and right arguments directories and constructs two lists of directories inside (recursively) for each side
   left and right - we are only interested in directories. They should contain *relative paths* to the comparison roots (i.e. L/R argument dirs).
   These lists should actually be hash or ordered tree sets probably - in fact, we remove the same relative paths from both lists and are only
   interested in paths that are not in the opposite directory tree.
- 
+
   Subsequently we construct an ordered tree map. The keys are all the basenames (final path parts of the relative paths) of both lists. The
   values are sorted lists of pairs of shape '(left or right enum, relative_path)'; sorting here means lexicografically - first we have left
   sorted paths, then right sorted paths that correspond to the given basename.
- 
+
   Finally, we use this tree map to construct the output: blank line separated blocks of shape for instance:
   ```
   my-dir
@@ -24,13 +24,25 @@ Please generate a CLI tool `compdir` using Rust. It accepts either 2 (left and r
   R a/b/my-dir
   R x/my-dir
   R z/w/s/my-dir
- 
+
   my-dir2
   L mydir2
- 
+
   ```
   (L refers to the left or first argument and R to the right or second argument relative path trees)
 
 2.
 Please add -H, --hyperlink option to add support to OSC 8 shell hyperlinks (link to the full paths). Add -c, --color option to colorize
   basename entries (first row of blocks) in blue. Update --help and README.md.
+
+3.
+Add `_compdir` zsh completion script. Please use /etc/hosts for host completion
+Add an option to
+ - Build the project using `make`,
+ - Install with `make install`
+
+ This would install:
+    - `compdir` into `~/bin/`.
+    - Zsh completion script `_compdir` into `~/.zfunc/`.
+
+Update README.md

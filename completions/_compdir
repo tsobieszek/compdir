@@ -1,0 +1,87 @@
+#compdef compdir
+
+_compdir_hosts() {
+  awk '
+    /^[[:space:]]*#/ { next }
+    {
+      for (i = 2; i <= NF; i++) {
+        if ($i != "" && $i !~ /^#/) {
+          print $i
+        }
+      }
+    }
+  ' /etc/hosts | sort -u
+}
+
+_compdir_remote_completion() {
+  local host=$1
+  local path_prefix=$2
+  local remote_dir remote_base remote_cmd output
+  local -a entries matches
+
+  if [[ $path_prefix == */* ]]; then
+    remote_dir=${path_prefix:h}
+    remote_base=${path_prefix:t}
+  else
+    remote_dir=.
+    remote_base=$path_prefix
+  fi
+
+  remote_cmd=$'
+    cd -- '"${(q)remote_dir}"$' 2>/dev/null || exit 1
+    for entry in .* *; do
+      [ -e "$entry" ] || continue
+      case $entry in
+        .|..) continue ;;
+      esac
+      if [ -d "$entry" ]; then
+        printf "%s/\n" "${entry#./}"
+      else
+        printf "%s\n" "${entry#./}"
+      fi
+    done
+  '
+
+  output=$(ssh "$host" "$remote_cmd") || return 1
+  entries=("${(@f)output}")
+  matches=()
+
+  for entry in "${entries[@]}"; do
+    if [[ -n $remote_base && $entry != ${remote_base}* ]]; then
+      continue
+    fi
+    matches+=("$entry")
+  done
+
+  compadd -Q -a matches
+}
+
+_compdir() {
+  _arguments -s \
+    '(-h --help)'{-h,--help}'[show help]' \
+    '(-H --hyperlink)'{-H,--hyperlink}'[wrap displayed paths in OSC 8 hyperlinks]' \
+    '(-c --color)'{-c,--color}'[colorize basename rows in blue]' \
+    '*:argument:_compdir_complete'
+}
+
+_compdir_complete() {
+  local -a hosts
+  hosts=("${(@f)$(_compdir_hosts)}")
+
+  if [[ ${words[CURRENT]} == *:* ]]; then
+    local host=${words[CURRENT]%%:*}
+    local path_prefix=${words[CURRENT]#*:}
+    if [[ ${words[CURRENT]#*:} == "" ]]; then
+      compset -P '*:'
+      _compdir_remote_completion "$host" ""
+    else
+      compset -P '*:'
+      _compdir_remote_completion "$host" "$path_prefix"
+    fi
+  else
+    _wanted remote-hosts expl 'remote hosts' compadd -Q -S ':' -a hosts
+    _wanted local-paths expl 'local paths' _files -/
+  fi
+}
+
+_compdir "$@"
