@@ -5,8 +5,8 @@
 ## Usage
 
 ```text
-compdir [-H|--hyperlink] [-c|--color] <right>
-compdir [-H|--hyperlink] [-c|--color] <left> <right>
+compdir [-H|--hyperlink] [-c|--color] [-L<d>] <right>
+compdir [-H|--hyperlink] [-c|--color] [-L<d>] <left> <right>
 compdir -h|--help
 ```
 
@@ -16,6 +16,7 @@ Optional display flags:
 
 - `-H`, `--hyperlink` wraps each displayed directory path in an OSC 8 hyperlink that points to the full path
 - `-c`, `--color` colors the basename row of each block blue
+- `-L<d>` restricts the scan to at most depth `d` on both sides (e.g. `-L1` compares only top-level directories)
 
 ## Argument Forms
 

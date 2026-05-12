@@ -61,6 +61,7 @@ _compdir() {
     '(-h --help)'{-h,--help}'[show help]' \
     '(-H --hyperlink)'{-H,--hyperlink}'[wrap displayed paths in OSC 8 hyperlinks]' \
     '(-c --color)'{-c,--color}'[colorize basename rows in blue]' \
+    '-L+[restrict comparison to depth d (e.g. -L1 for top-level only)]:depth:' \
     '*:argument:_compdir_complete'
 }
 

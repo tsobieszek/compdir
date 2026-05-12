@@ -16,6 +16,7 @@ struct CliOptions {
     help: bool,
     render: RenderOptions,
     positionals: Vec<String>,
+    max_depth: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -48,11 +49,15 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let cli = parse_cli(env::args().skip(1));
+    let cli = parse_cli(env::args().skip(1))?;
 
     if cli.help {
         print_help();
         return Ok(());
+    }
+
+    if matches!(cli.max_depth, Some(0)) {
+        return Err("-L depth must be at least 1".to_string());
     }
 
     let (left_raw, right_raw) = match cli.positionals.as_slice() {
@@ -66,8 +71,8 @@ fn run() -> Result<(), String> {
 
     let (left, right) = normalize_pair(left_raw, right_raw)?;
 
-    let left_dirs = collect_dirs(&left)?;
-    let right_dirs = collect_dirs(&right)?;
+    let left_dirs = collect_dirs(&left, cli.max_depth)?;
+    let right_dirs = collect_dirs(&right, cli.max_depth)?;
 
     let report = render_report(&left_dirs, &right_dirs, cli.render);
     if !report.is_empty() {
@@ -79,14 +84,15 @@ fn run() -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "Usage:\n  compdir [-H|--hyperlink] [-c|--color] <right>\n  compdir [-H|--hyperlink] [-c|--color] <left> <right>\n  compdir -h|--help\n\nOptions:\n  -H, --hyperlink  add OSC 8 hyperlinks to the full paths\n  -c, --color      colorize basename rows in blue\n\nEach argument is `path`, `host:path`, or `host:`.\nIf one side is `host:` and the other is a local `path`, the remote side uses the local path's absolute form.\nIf both sides are `host:`, each side uses that host's current directory."
+        "Usage:\n  compdir [-H|--hyperlink] [-c|--color] [-L<d>] <right>\n  compdir [-H|--hyperlink] [-c|--color] [-L<d>] <left> <right>\n  compdir -h|--help\n\nOptions:\n  -H, --hyperlink  add OSC 8 hyperlinks to the full paths\n  -c, --color      colorize basename rows in blue\n  -L<d>            restrict comparison to depth d (e.g. -L1 for top-level only)\n\nEach argument is `path`, `host:path`, or `host:`.\nIf one side is `host:` and the other is a local `path`, the remote side uses the local path's absolute form.\nIf both sides are `host:`, each side uses that host's current directory."
     );
 }
 
-fn parse_cli(args: impl IntoIterator<Item = String>) -> CliOptions {
+fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliOptions, String> {
     let mut help = false;
     let mut hyperlink = false;
     let mut color = false;
+    let mut max_depth: Option<usize> = None;
     let mut positionals = Vec::new();
 
     for arg in args {
@@ -94,15 +100,22 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> CliOptions {
             "-h" | "--help" => help = true,
             "-H" | "--hyperlink" => hyperlink = true,
             "-c" | "--color" => color = true,
+            s if s.starts_with("-L") => {
+                let n = s[2..]
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid depth argument `{s}`: expected -L<integer>"))?;
+                max_depth = Some(n);
+            }
             _ => positionals.push(arg),
         }
     }
 
-    CliOptions {
+    Ok(CliOptions {
         help,
         render: RenderOptions { hyperlink, color },
         positionals,
-    }
+        max_depth,
+    })
 }
 
 fn normalize_pair(
@@ -199,18 +212,24 @@ fn resolve_remote_path(host: &str, path: Option<&str>) -> Result<String, String>
     Ok(root.to_string())
 }
 
-fn collect_dirs(target: &ResolvedTarget) -> Result<BTreeMap<String, String>, String> {
+fn collect_dirs(
+    target: &ResolvedTarget,
+    max_depth: Option<usize>,
+) -> Result<BTreeMap<String, String>, String> {
     match target {
-        ResolvedTarget::Local(root) => collect_local_dirs(root),
-        ResolvedTarget::Remote { host, root } => collect_remote_dirs(host, root),
+        ResolvedTarget::Local(root) => collect_local_dirs(root, max_depth),
+        ResolvedTarget::Remote { host, root } => collect_remote_dirs(host, root, max_depth),
     }
 }
 
-fn collect_local_dirs(root: &Path) -> Result<BTreeMap<String, String>, String> {
+fn collect_local_dirs(
+    root: &Path,
+    max_depth: Option<usize>,
+) -> Result<BTreeMap<String, String>, String> {
     let mut dirs = BTreeMap::new();
-    let mut stack = vec![root.to_path_buf()];
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
 
-    while let Some(dir) = stack.pop() {
+    while let Some((dir, depth)) = stack.pop() {
         let entries = fs::read_dir(&dir)
             .map_err(|err| format!("failed to read directory `{}`: {err}", dir.display()))?;
 
@@ -225,12 +244,15 @@ fn collect_local_dirs(root: &Path) -> Result<BTreeMap<String, String>, String> {
                 let rel = path.strip_prefix(root).map_err(|_| {
                     format!("failed to compute relative path for `{}`", path.display())
                 })?;
+                let new_depth = depth + 1;
                 if !rel.as_os_str().is_empty() {
                     let rel_path = path_to_string(rel);
                     let full_path = path_to_string(&path);
                     dirs.insert(rel_path, local_uri(&full_path));
                 }
-                stack.push(path);
+                if max_depth.map_or(true, |d| new_depth < d) {
+                    stack.push((path, new_depth));
+                }
             }
         }
     }
@@ -238,9 +260,16 @@ fn collect_local_dirs(root: &Path) -> Result<BTreeMap<String, String>, String> {
     Ok(dirs)
 }
 
-fn collect_remote_dirs(host: &str, root: &str) -> Result<BTreeMap<String, String>, String> {
+fn collect_remote_dirs(
+    host: &str,
+    root: &str,
+    max_depth: Option<usize>,
+) -> Result<BTreeMap<String, String>, String> {
+    let maxdepth_arg = max_depth
+        .map(|d| format!("-maxdepth {d} "))
+        .unwrap_or_default();
     let remote_cmd = format!(
-        "cd -- {} && find . -mindepth 1 -type d -print0",
+        "cd -- {} && find . -mindepth 1 {maxdepth_arg}-type d -print0",
         shell_quote(root)
     );
     let output = run_ssh(host, &remote_cmd)?;
@@ -523,11 +552,25 @@ mod tests {
             "left".to_string(),
             "--color".to_string(),
             "right".to_string(),
-        ]);
+        ])
+        .unwrap();
 
         assert!(!cli.help);
         assert!(cli.render.hyperlink);
         assert!(cli.render.color);
         assert_eq!(cli.positionals, vec!["left", "right"]);
+        assert_eq!(cli.max_depth, None);
+    }
+
+    #[test]
+    fn cli_parses_depth_flag() {
+        let cli = parse_cli(["-L3".to_string(), "right".to_string()]).unwrap();
+        assert_eq!(cli.max_depth, Some(3));
+        assert_eq!(cli.positionals, vec!["right"]);
+    }
+
+    #[test]
+    fn cli_rejects_invalid_depth_flag() {
+        assert!(parse_cli(["-Lfoo".to_string()]).is_err());
     }
 }
